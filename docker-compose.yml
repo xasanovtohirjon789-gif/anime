@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  anime-bot:
+    build: .
+    container_name: anime-bot
+    restart: unless-stopped
+    environment:
+      - TOKEN=${TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./anime_bot.db:/app/anime_bot.db
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+      - ./exports:/app/exports
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - anime-network
+
+networks:
+  anime-network:
+    driver: bridge
