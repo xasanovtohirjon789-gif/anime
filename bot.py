@@ -64,12 +64,17 @@ class AnimeBot:
                 28: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_mandatory_channel_name)],
                 29: [CallbackQueryHandler(self.delete_mandatory_channel_choice)],
             },
-            fallbacks=[CommandHandler("admin", self.admin_panel)],
+            fallbacks=[CommandHandler("admin", self.admin_panel), MessageHandler(filters.COMMAND, self.admin_panel)],
             per_message=False
         )
         
         self.app.add_handler(start_conv)
         self.app.add_handler(admin_conv)
+        self.app.add_handler(CallbackQueryHandler(self.handle_verify_callback, pattern="^check_verify$"))
+        self.app.add_handler(CallbackQueryHandler(self.handle_view_callback, pattern="^view$"))
+        self.app.add_handler(CallbackQueryHandler(self.handle_page_callback, pattern="^page_"))
+        self.app.add_handler(CallbackQueryHandler(self.handle_part_callback, pattern="^part_"))
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_anime_code))
         self.app.add_handler(CommandHandler("help", self.help_command))
         
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -323,9 +328,8 @@ class AnimeBot:
         return 4
     
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        user_id = update.effective_user.id      
-        if user_id != ADMIN_ID:
-
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
             await update.message.reply_text("❌ Siz admin emassiz!")
             return ConversationHandler.END
         
@@ -351,6 +355,7 @@ class AnimeBot:
         query = update.callback_query
         await query.answer()
         choice = query.data
+        logger.info(f"Admin choice: {choice}")
         
         if choice == "add_anime":
             await query.edit_message_text("📝 Anime izohini yuboring:\n(Rasm bilan yubora olasiz)")
@@ -852,6 +857,192 @@ Admin panelida:
 ✔ Guruh boshqaruvi
         """
         await update.message.reply_text(help_text)
+    
+    async def handle_anime_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        code = update.message.text.strip()
+        
+        if not code.isdigit():
+            return
+        
+        db.add_user(user_id)
+        
+        channels = db.get_mandatory_channels()
+        not_subscribed = []
+        
+        for channel in channels:
+            channel_id = channel['channel_id']
+            try:
+                channel_id = int(channel_id)
+            except (ValueError, TypeError):
+                pass
+            
+            is_member = False
+            try:
+                member = await context.bot.get_chat_member(channel_id, user_id)
+                if member.status in ['member', 'administrator', 'creator']:
+                    is_member = True
+            except:
+                pass
+            
+            if not is_member:
+                not_subscribed.append(channel)
+        
+        if not_subscribed:
+            keyboard = [[InlineKeyboardButton(ch['name'], url=ch['link'])] for ch in not_subscribed]
+            keyboard.append([InlineKeyboardButton("✅ Tekshirish", callback_data="check_verify")])
+            
+            await update.message.reply_text(
+                "❌ Majburiy obuna kanallari topilmadi!\n\n"
+                "📺 Quyidagi kanallarga obuna bo'ling:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data['pending_anime_code'] = code
+            return
+        
+        anime = db.get_anime_by_code(int(code))
+        if not anime:
+            await update.message.reply_text(f"❌ Kod {code} bo'yicha anime topilmadi!")
+            return
+        
+        context.user_data['current_anime_code'] = anime['code']
+        context.user_data['current_anime_id'] = anime['id']
+        
+        text = f"<b>{anime['description']}</b>" if anime['description'] else "Anime izohi"
+        
+        if anime['photo_id']:
+            await update.message.reply_photo(
+                photo=anime['photo_id'],
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🎬 Animeni ko'rish", callback_data="view")
+                ]])
+            )
+        else:
+            await update.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🎬 Animeni ko'rish", callback_data="view")
+                ]])
+            )
+    
+    async def handle_verify_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        
+        channels = db.get_mandatory_channels()
+        not_subscribed = []
+        
+        for channel in channels:
+            channel_id = channel['channel_id']
+            try:
+                channel_id = int(channel_id)
+            except (ValueError, TypeError):
+                pass
+            
+            is_member = False
+            try:
+                member = await context.bot.get_chat_member(channel_id, user_id)
+                if member.status in ['member', 'administrator', 'creator']:
+                    is_member = True
+            except:
+                pass
+            
+            if not is_member:
+                not_subscribed.append(channel['name'])
+        
+        if not_subscribed:
+            keyboard = [[InlineKeyboardButton("🔄 Qayta tekshirish", callback_data="check_verify")]]
+            await query.edit_message_text(
+                f"❌ Siz ushbu kanallarga obuna bo'lmagansiz:\n" + "\n".join(not_subscribed),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        
+        pending_code = context.user_data.get('pending_anime_code')
+        if pending_code:
+            context.user_data.pop('pending_anime_code', None)
+            anime = db.get_anime_by_code(int(pending_code))
+            if not anime:
+                await query.edit_message_text(f"❌ Kod {pending_code} bo'yicha anime topilmadi!")
+                return
+            
+            context.user_data['current_anime_code'] = anime['code']
+            context.user_data['current_anime_id'] = anime['id']
+            
+            text = f"<b>{anime['description']}</b>" if anime['description'] else "Anime izohi"
+            
+            if anime['photo_id']:
+                await query.edit_message_media(
+                    media=anime['photo_id'],
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🎬 Animeni ko'rish", callback_data="view")
+                    ]])
+                )
+            else:
+                await query.edit_message_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🎬 Animeni ko'rish", callback_data="view")
+                    ]])
+                )
+        else:
+            await query.edit_message_text(
+                "✅ Obuna tekshiruvi muvaffaqiyatli o'tdi!\n\n"
+                "📝 Anime kodini kiriting:\n"
+                "(Masalan: 12, 45, 100)"
+            )
+    
+    async def handle_view_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        
+        anime_code = context.user_data.get('current_anime_code')
+        if not anime_code:
+            await query.answer("❌ Xato yuz berdi!", show_alert=True)
+            return
+        
+        context.user_data['current_page'] = 1
+        await self.show_parts_page(query, context, anime_code, 1)
+    
+    async def handle_page_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        
+        anime_code = context.user_data.get('current_anime_code')
+        if not anime_code:
+            await query.answer("❌ Xato yuz berdi!", show_alert=True)
+            return
+        
+        callback_data = query.data
+        if callback_data == "page_info":
+            await query.answer("Sahifa ma'lumoti", show_alert=False)
+            return
+        
+        page = int(callback_data.split("_")[1])
+        await self.show_parts_page(query, context, anime_code, page)
+    
+    async def handle_part_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
+        
+        anime_code = context.user_data.get('current_anime_code')
+        callback_data = query.data
+        
+        if callback_data.startswith("part_"):
+            part_num = int(callback_data.split("_")[1])
+            part = db.get_anime_part(anime_code, part_num)
+            
+            if part:
+                await query.message.reply_video(part['file_id'])
+            else:
+                await query.answer("❌ Qism topilmadi!", show_alert=True)
     
     def run(self):
         self.app.run_polling()
